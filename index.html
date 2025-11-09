@@ -4,6 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sistema de Controle Financeiro</title>
+    <!-- Favicon -->
+    <link rel="icon" type="image/png" href="https://i.imgur.com/OLZZ2ds.png">
+    <link rel="icon" type="image/svg+xml" href="https://i.imgur.com/OLZZ2ds.png">
+    <link rel="apple-touch-icon" href="https://i.imgur.com/OLZZ2ds.png">
+    <link rel="mask-icon" href="favicon.svg" color="#3b82f6">
+    <meta name="theme-color" content="#3b82f6">
     <style>
         * {
             margin: 0;
@@ -1100,7 +1106,11 @@
                     <button class="filter-btn" data-type="income" aria-pressed="false" onclick="changeFilter('income')">Receitas</button>
                     <button class="filter-btn" data-type="expense" aria-pressed="false" onclick="changeFilter('expense')">Despesas</button>
                 </div>
-                <button class="btn btn-secondary" type="button" onclick="exportXLSX()">📤 Exportar Excel</button>
+                <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                    <button class="btn btn-secondary" type="button" onclick="exportXLSX()">📤 Exportar Excel</button>
+                    <button class="btn btn-secondary" type="button" onclick="triggerImportXLSX()">📥 Importar Excel</button>
+                    <input type="file" id="excelImportInput" accept=".xlsx,.xls" style="display:none" onchange="importXLSXFromFile(event)">
+                </div>
             </div>
             <div class="transactions-list" id="transactionsList">
                 <div class="empty-state">
@@ -2347,6 +2357,146 @@ function initTabsAccessibility() {
             } else {
                 XLSX.writeFile(wb, filename, { bookType: 'xlsx', cellDates: true, compression: true });
             }
+        }
+
+        function triggerImportXLSX() {
+            var inp = document.getElementById('excelImportInput');
+            if (inp) inp.click();
+        }
+
+        function importXLSXFromFile(e) {
+            var file = e && e.target ? e.target.files[0] : null;
+            // Reseta o input para permitir reimportar o mesmo arquivo
+            if (e && e.target) { e.target.value = ''; }
+            if (!file) return;
+            if (typeof XLSX === 'undefined') {
+                alert('Biblioteca Excel não carregada. Verifique sua conexão.');
+                return;
+            }
+
+            var reader = new FileReader();
+            reader.onload = function(evt) {
+                try {
+                    var data = new Uint8Array(evt.target.result);
+                    var wb = XLSX.read(data, { type: 'array' });
+                    var sheetName = wb.SheetNames && wb.SheetNames.length ? wb.SheetNames[0] : null;
+                    if (!sheetName) {
+                        alert('Arquivo Excel sem planilhas.');
+                        return;
+                    }
+                    var ws = wb.Sheets[sheetName];
+                    var rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+                    if (!rows || rows.length === 0) {
+                        alert('Planilha vazia ou não reconhecida.');
+                        return;
+                    }
+
+                    // Detecta linha de cabeçalho (procura por rótulos conhecidos)
+                    var headerRowIndex = -1;
+                    for (var i = 0; i < Math.min(rows.length, 10); i++) {
+                        var row = rows[i];
+                        var norm = row.map(function(x){ return String(x).trim().toLowerCase(); });
+                        var hasBasic = norm.indexOf('data') !== -1 && norm.indexOf('tipo') !== -1 && (norm.indexOf('descrição') !== -1 || norm.indexOf('descricao') !== -1) && norm.indexOf('categoria') !== -1 && norm.indexOf('valor') !== -1;
+                        if (hasBasic) { headerRowIndex = i; break; }
+                    }
+                    if (headerRowIndex === -1) {
+                        // Considera que há título na primeira linha e cabeçalho na segunda, como no export
+                        headerRowIndex = 1;
+                    }
+                    var header = rows[headerRowIndex] || [];
+                    function idxContains(arr, needle) {
+                        for (var j = 0; j < arr.length; j++) {
+                            var s = String(arr[j]).toLowerCase();
+                            if (s.indexOf(needle) !== -1) return j;
+                        }
+                        return -1;
+                    }
+                    var colIndex = {
+                        data: idxContains(header, 'data'),
+                        tipo: idxContains(header, 'tipo'),
+                        descricao: (idxContains(header, 'descrição') !== -1 ? idxContains(header, 'descrição') : idxContains(header, 'descricao')),
+                        categoria: idxContains(header, 'categoria'),
+                        valor: idxContains(header, 'valor'),
+                        recorrente: idxContains(header, 'recorr'),
+                        parcela: idxContains(header, 'parcela')
+                    };
+
+                    var importedCount = 0;
+                    for (var r = headerRowIndex + 1; r < rows.length; r++) {
+                        var rowR = rows[r];
+                        if (!rowR || rowR.length === 0) continue;
+                        var dateCell = (colIndex.data >= 0) ? rowR[colIndex.data] : '';
+                        var typeCell = (colIndex.tipo >= 0) ? rowR[colIndex.tipo] : '';
+                        var descCell = (colIndex.descricao >= 0) ? rowR[colIndex.descricao] : '';
+                        var catCell = (colIndex.categoria >= 0) ? rowR[colIndex.categoria] : 'Outros';
+                        var valCell = (colIndex.valor >= 0) ? rowR[colIndex.valor] : '';
+
+                        if (!descCell || valCell === '') continue; // campos essenciais
+                        var amount = (typeof valCell === 'number') ? valCell : parseFloat(String(valCell).replace(',', '.'));
+                        if (isNaN(amount)) continue;
+
+                        var typeNorm = String(typeCell || '').toLowerCase().trim();
+                        if (typeNorm === 'receita' || typeNorm === 'receitas') typeNorm = 'income';
+                        if (typeNorm === 'despesa' || typeNorm === 'despesas') typeNorm = 'expense';
+                        if (typeNorm !== 'income' && typeNorm !== 'expense') {
+                            typeNorm = amount >= 0 ? 'income' : 'expense';
+                            amount = Math.abs(amount);
+                        }
+
+                        var dateIso = parseExcelDateToISO(dateCell) || new Date().toISOString().slice(0,10);
+
+                        var tx = {
+                            id: Date.now() + r,
+                            description: String(descCell),
+                            amount: amount,
+                            type: typeNorm,
+                            category: String(catCell || 'Outros'),
+                            date: dateIso,
+                            createdAt: new Date().toISOString()
+                        };
+
+                        transactions.push(tx);
+                        importedCount++;
+                    }
+
+                    saveTransactions();
+                    updateDisplay();
+                    alert('Importação concluída: ' + importedCount + ' transações adicionadas.');
+                } catch (err) {
+                    alert('Erro ao importar Excel: ' + (err && err.message ? err.message : String(err)));
+                }
+            };
+            reader.readAsArrayBuffer(file);
+        }
+
+        function parseExcelDateToISO(value) {
+            if (!value) return null;
+            if (value instanceof Date) {
+                return value.toISOString().slice(0,10);
+            }
+            var num = Number(value);
+            if (!isNaN(num) && num > 0) {
+                // Tenta converter número de data do Excel
+                try {
+                    var dcode = XLSX.SSF && XLSX.SSF.parse_date_code ? XLSX.SSF.parse_date_code(num) : null;
+                    if (dcode && dcode.y && dcode.m && dcode.d) {
+                        var jsDate = new Date(Date.UTC(dcode.y, dcode.m - 1, dcode.d));
+                        return jsDate.toISOString().slice(0,10);
+                    }
+                } catch (e) {}
+            }
+            var s = String(value).trim();
+            var m1 = s.match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})$/); // dd/mm/yyyy
+            if (m1) {
+                var d1 = new Date(m1[3] + '-' + m1[2] + '-' + m1[1]);
+                if (!isNaN(d1.getTime())) return d1.toISOString().slice(0,10);
+            }
+            var m2 = s.match(/^(\d{4})[\/\-](\d{2})[\/\-](\d{2})$/); // yyyy-mm-dd
+            if (m2) {
+                var d2 = new Date(m2[1] + '-' + m2[2] + '-' + m2[3]);
+                if (!isNaN(d2.getTime())) return d2.toISOString().slice(0,10);
+            }
+            return null;
         }
 
 
